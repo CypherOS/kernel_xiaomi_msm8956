@@ -99,7 +99,7 @@
 	(TASHA_CPE_SS_ERR_STATUS_WDOG_BITE | \
 	 TASHA_CPE_SS_ERR_STATUS_MEM_ACCESS)
 
-#define SLIM_BW_CLK_GEAR_10 24600000
+#define SLIM_BW_CLK_GEAR_9 6200000
 #define SLIM_BW_UNVOTE 0
 
 #define CPE_FLL_CLK_75MHZ 75000000
@@ -535,9 +535,6 @@ static struct snd_soc_dai_driver tasha_dai[];
 static int wcd9335_get_micb_vout_ctl_val(u32 micb_mv);
 
 static int tasha_config_compander(struct snd_soc_codec *, int, int);
-static void tasha_codec_set_tx_hold(struct snd_soc_codec *, u16, bool);
-static int tasha_codec_internal_rco_ctrl(struct snd_soc_codec *codec,
-				  bool enable);
 
 /* Hold instance to soundwire platform device */
 struct tasha_swr_ctrl_data {
@@ -794,12 +791,6 @@ struct tasha_priv {
 	int hph_r_gain;
 	int rx_7_count;
 	int rx_8_count;
-	bool clk_mode;
-	bool clk_internal;
-
-	/* Lock to protect mclk enablement */
-	struct mutex mclk_lock;
-
 };
 
 static int tasha_codec_vote_max_bw(struct snd_soc_codec *codec,
@@ -1769,7 +1760,7 @@ static void tasha_wcd_mbhc_calc_impedance(struct wcd_mbhc *mbhc, uint32_t *zl,
 		{4, 0, 4, 0x08, 0x14, 0x18}, /* < 32ohm */
 		{2, 0, 3, 0x18, 0x7C, 0x90}, /* 32ohm < Z < 400ohm */
 		{1, 4, 5, 0x18, 0x7C, 0x90}, /* 400ohm < Z < 1200ohm */
-		{2, 6, 7, 0x18, 0x7C, 0x90}, /* >1200ohm */
+		{1, 6, 7, 0x18, 0x7C, 0x90}, /* >1200ohm */
 	};
 	struct tasha_mbhc_zdet_param *zdet_param_ptr = NULL;
 	s16 d1_a[][4] = {
@@ -12118,7 +12109,7 @@ static int tasha_codec_vote_max_bw(struct snd_soc_codec *codec,
 		return 0;
 
 	if (vote)
-		bw_ops = SLIM_BW_CLK_GEAR_10;
+		bw_ops = SLIM_BW_CLK_GEAR_9;
 	else
 		bw_ops = SLIM_BW_UNVOTE;
 
@@ -12395,45 +12386,6 @@ static struct kobj_attribute headphone_gain_attribute =
 		headphone_gain_show,
 		headphone_gain_store);
 
-static ssize_t headphone_pa_gain_show(struct kobject *kobj,
-		struct kobj_attribute *attr, char *buf)
-{
-	u8 hph_l_gain = snd_soc_read(sound_control_codec_ptr, WCD9335_HPH_L_EN);
-	u8 hph_r_gain = snd_soc_read(sound_control_codec_ptr, WCD9335_HPH_R_EN);
-
-	return snprintf(buf, PAGE_SIZE, "%d %d\n",
-		hph_l_gain & 0x1F, hph_r_gain & 0x1F);
-}
-
-static ssize_t headphone_pa_gain_store(struct kobject *kobj,
-		struct kobj_attribute *attr, const char *buf, size_t count)
-{
-	unsigned int input_l, input_r;
-	struct tasha_priv *tasha = snd_soc_codec_get_drvdata(sound_control_codec_ptr);
-
-	sscanf(buf, "%d %d", &input_l, &input_r);
-
-	if (input_l < 1 || input_l > 20)
-		input_l = 1;
-
-	if (input_r < 1 || input_r > 20)
-		input_r = 1;
-
-	snd_soc_update_bits(sound_control_codec_ptr, WCD9335_HPH_L_EN, 0x1f, input_l);
-	snd_soc_update_bits(sound_control_codec_ptr, WCD9335_HPH_R_EN, 0x1f, input_r);
-
-	tasha->hph_l_gain = input_l;
-	tasha->hph_r_gain = input_r;
-
-	return count;
-}
-
-static struct kobj_attribute headphone_pa_gain_attribute =
-	__ATTR(headphone_pa_gain, 0664,
-		headphone_pa_gain_show,
-		headphone_pa_gain_store);
-
-
 static ssize_t mic_gain_show(struct kobject *kobj,
 		struct kobj_attribute *attr, char *buf)
 {
@@ -12460,38 +12412,6 @@ static struct kobj_attribute mic_gain_attribute =
 	__ATTR(mic_gain, 0664,
 		mic_gain_show,
 		mic_gain_store);
-
-static ssize_t earpiece_gain_show(struct kobject *kobj,
-		struct kobj_attribute *attr, char *buf)
-{
-	return snprintf(buf, PAGE_SIZE, "%d\n",
-		snd_soc_read(sound_control_codec_ptr, WCD9335_CDC_RX0_RX_VOL_CTL));
-}
-
-static ssize_t earpiece_gain_store(struct kobject *kobj,
-		struct kobj_attribute *attr, const char *buf, size_t count)
-{
-	int input;
-
-	sscanf(buf, "%d", &input);
-
-	if (input < -10 || input > 20)
-		input = 0;
-
-	snd_soc_write(sound_control_codec_ptr, WCD9335_CDC_RX0_RX_VOL_CTL, input);
-	snd_soc_write(sound_control_codec_ptr, WCD9335_CDC_RX0_RX_VOL_MIX_CTL, input);
-
-	pr_info("Sound Control: Boosted Earpiece RX0 value %d\n",
-		snd_soc_read(sound_control_codec_ptr,
-		WCD9335_CDC_RX0_RX_VOL_CTL));
-
-	return count;
-}
-
-static struct kobj_attribute earpiece_gain_attribute =
-	__ATTR(earpiece_gain, 0664,
-		earpiece_gain_show,
-		earpiece_gain_store);
 
 static ssize_t speaker_gain_show(struct kobject *kobj,
 		struct kobj_attribute *attr, char *buf)
@@ -12524,9 +12444,7 @@ static struct kobj_attribute speaker_gain_attribute =
 static struct attribute *sound_control_attrs[] = {
 		&headphone_gain_attribute.attr,
 		&mic_gain_attribute.attr,
-		&earpiece_gain_attribute.attr,
 		&speaker_gain_attribute.attr,
-		&headphone_pa_gain_attribute.attr,
 		NULL,
 };
 
@@ -13311,3 +13229,4 @@ module_platform_driver(tasha_codec_driver);
 
 MODULE_DESCRIPTION("Tasha Codec driver");
 MODULE_LICENSE("GPL v2");
+
